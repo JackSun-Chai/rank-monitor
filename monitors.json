@@ -1,0 +1,12 @@
+[
+  {
+    "asin": "B001",
+    "keyword": "test",
+    "zip_code": "",
+    "product_name": "Test Product",
+    "owner": "Alice",
+    "label": "",
+    "schedule_time": "08:00",
+    "timezone": "America/Los_Angeles"
+  }
+]

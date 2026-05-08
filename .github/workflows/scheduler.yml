@@ -1,0 +1,45 @@
+name: Rank Monitor Scheduler
+
+on:
+  schedule:
+    # Run every 2 hours, at :07 past the hour (avoid peak :00 traffic)
+    - cron: "7 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      force_all:
+        description: "Force run ALL monitors (ignore schedule_time filter)"
+        type: boolean
+        default: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium --with-deps
+
+      - name: Run cloud scraper
+        run: node cloud-scraper.js
+        env:
+          FORCE_ALL: ${{ github.event.inputs.force_all || 'false' }}
+
+      - name: Commit & push results
+        run: |
+          git config user.name "rank-monitor-bot"
+          git config user.email "bot@rankmonitor.local"
+          git add results/ monitors.json
+          git diff --staged --quiet || git commit -m "Update rankings [skip ci]"
+          git push

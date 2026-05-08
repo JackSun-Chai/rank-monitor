@@ -1,0 +1,15 @@
+{
+  "name": "rank-monitor",
+  "version": "1.0.0",
+  "description": "Amazon product rank monitor — organic & ad rank tracking with incognito Chrome",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "install-browser": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "playwright": "^1.48.0",
+    "sql.js": "^1.11.0"
+  }
+}
