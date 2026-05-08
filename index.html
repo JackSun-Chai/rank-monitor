@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rank Monitor — 产品排名监控</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="app-header">
+  <h1>Rank Monitor</h1>
+  <span class="subtitle">产品自然位 & 广告位追踪</span>
+</header>
+
+<main class="app-main">
+
+  <!-- Search Panel -->
+  <section class="card search-panel">
+    <h2>关键词排名查询</h2>
+    <form id="search-form" class="search-form">
+      <div class="form-row">
+        <div class="form-group">
+          <label for="keyword">搜索关键词 *</label>
+          <input type="text" id="keyword" placeholder="例如: bluetooth speaker" required>
+        </div>
+        <div class="form-group">
+          <label for="asin">目标 ASIN *</label>
+          <input type="text" id="asin" placeholder="例如: B09XYZ1234" required>
+        </div>
+        <div class="form-group">
+          <label for="zip-code">美国邮编 (可选)</label>
+          <input type="text" id="zip-code" placeholder="例如: 10001" maxlength="5">
+        </div>
+        <button type="submit" id="search-btn" class="btn btn-primary">查询排名</button>
+      </div>
+    </form>
+    <div id="search-status" class="status hidden"></div>
+  </section>
+
+  <!-- Result Panel -->
+  <section id="result-panel" class="card result-panel hidden">
+    <h2>查询结果</h2>
+    <div class="result-cards">
+      <div class="result-card organic">
+        <span class="rank-label">自然排名</span>
+        <span class="rank-value" id="organic-rank">--</span>
+        <span class="rank-page" id="organic-page"></span>
+        <span class="rank-badge">Organic</span>
+      </div>
+      <div class="result-card ad">
+        <span class="rank-label">广告排名</span>
+        <span class="rank-value" id="ad-rank">--</span>
+        <span class="rank-page" id="ad-page"></span>
+        <span class="rank-badge">Sponsored</span>
+      </div>
+      <div class="result-card info">
+        <span class="rank-label">总搜索结果</span>
+        <span class="rank-value" id="total-results">--</span>
+        <span class="rank-page">已扫描 <span id="pages-scanned">0</span> 页</span>
+        <span class="rank-badge">Total</span>
+      </div>
+    </div>
+    <div id="result-error" class="error-msg hidden"></div>
+  </section>
+
+  <!-- Monitor Panel -->
+  <section class="card monitor-panel">
+    <h2>监控列表</h2>
+    <form id="monitor-form" class="monitor-form">
+      <div class="form-row">
+        <div class="form-group">
+          <input type="text" id="m-asin" placeholder="ASIN" required>
+        </div>
+        <div class="form-group">
+          <input type="text" id="m-keyword" placeholder="关键词" required>
+        </div>
+        <div class="form-group">
+          <input type="text" id="m-zip" placeholder="邮编" maxlength="5">
+        </div>
+        <div class="form-group">
+          <input type="text" id="m-product-name" placeholder="产品名称">
+        </div>
+        <div class="form-group">
+          <input type="text" id="m-owner" placeholder="负责人">
+        </div>
+        <div class="form-group">
+          <input type="text" id="m-label" placeholder="备注标签">
+        </div>
+        <div class="form-group">
+          <input type="time" id="m-schedule" class="time-picker" title="定时抓取时间 (留空则不启用)">
+        </div>
+        <div class="form-group">
+          <select id="m-timezone" title="时区 (默认太平洋时间)">
+            <option value="America/Los_Angeles">太平洋 PT</option>
+            <option value="America/Denver">山地 MT</option>
+            <option value="America/Chicago">中部 CT</option>
+            <option value="America/New_York">东部 ET</option>
+            <option value="Asia/Shanghai">北京</option>
+            <option value="Asia/Tokyo">东京</option>
+            <option value="Europe/London">伦敦</option>
+          </select>
+        </div>
+        <button type="submit" class="btn btn-outline">添加监控</button>
+        <button type="button" id="run-all-btn" class="btn btn-primary">一键刷新全部</button>
+        <button type="button" id="import-btn" class="btn btn-outline">📥 导入Excel</button>
+        <a href="/api/monitors/template" class="btn btn-outline" style="text-decoration:none">📋 下载模板</a>
+      </div>
+    </form>
+    <input type="file" id="import-file" accept=".xlsx,.xls,.csv" style="display:none">
+
+    <div class="table-wrap">
+      <table class="monitor-table">
+        <thead>
+          <tr>
+            <th>ASIN</th><th>关键词</th><th>邮编</th><th>产品名称</th><th>负责人</th><th>定时</th><th>时区</th>
+            <th>自然位</th><th>广告位</th><th>更新时间</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="monitor-tbody"></tbody>
+      </table>
+    </div>
+    <div id="monitor-status" class="status hidden"></div>
+  </section>
+
+  <!-- Trend Chart Panel -->
+  <section class="card trend-panel" id="trend-panel">
+    <h2>排名趋势
+      <select id="trend-asin" class="trend-select"></select>
+      <span id="trend-keyword" class="trend-label"></span>
+      <select id="trend-days" class="trend-select-short">
+        <option value="7">7 天</option>
+        <option value="14">14 天</option>
+        <option value="30" selected>30 天</option>
+        <option value="60">60 天</option>
+        <option value="90">90 天</option>
+      </select>
+    </h2>
+    <div class="chart-container">
+      <canvas id="trend-chart"></canvas>
+    </div>
+  </section>
+
+  <!-- History Table -->
+  <section class="card history-panel">
+    <h2>查询历史</h2>
+    <div class="history-filters">
+      <input type="text" id="h-keyword" placeholder="筛选关键词">
+      <input type="text" id="h-asin" placeholder="筛选 ASIN">
+      <button type="button" id="refresh-history" class="btn btn-outline">刷新</button>
+    </div>
+    <div class="table-wrap">
+      <table class="history-table">
+        <thead>
+          <tr>
+            <th>时间</th><th>关键词</th><th>ASIN</th><th>邮编</th>
+            <th>自然位</th><th>广告位</th><th>总结果</th><th>状态</th>
+          </tr>
+        </thead>
+        <tbody id="history-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<!-- Edit Modal -->
+<div id="edit-modal" class="modal-overlay hidden">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h3>编辑监控</h3>
+      <button class="modal-close" id="modal-close">&times;</button>
+    </div>
+    <form id="edit-form" class="modal-body">
+      <input type="hidden" id="edit-id">
+      <div class="form-row">
+        <div class="form-group">
+          <label>ASIN</label>
+          <input type="text" id="edit-asin" required>
+        </div>
+        <div class="form-group">
+          <label>关键词</label>
+          <input type="text" id="edit-keyword" required>
+        </div>
+        <div class="form-group">
+          <label>邮编</label>
+          <input type="text" id="edit-zip" maxlength="5">
+        </div>
+        <div class="form-group">
+          <label>产品名称</label>
+          <input type="text" id="edit-product-name">
+        </div>
+        <div class="form-group">
+          <label>负责人</label>
+          <input type="text" id="edit-owner">
+        </div>
+        <div class="form-group">
+          <label>备注标签</label>
+          <input type="text" id="edit-label">
+        </div>
+        <div class="form-group">
+          <label>定时抓取</label>
+          <input type="time" id="edit-schedule" class="time-picker">
+        </div>
+        <div class="form-group">
+          <label>时区</label>
+          <select id="edit-timezone">
+            <option value="America/Los_Angeles">太平洋 PT</option>
+            <option value="America/Denver">山地 MT</option>
+            <option value="America/Chicago">中部 CT</option>
+            <option value="America/New_York">东部 ET</option>
+            <option value="Asia/Shanghai">北京</option>
+            <option value="Asia/Tokyo">东京</option>
+            <option value="Europe/London">伦敦</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-outline" id="modal-cancel">取消</button>
+        <button type="submit" class="btn btn-primary">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="/static/script.js"></script>
+</body>
+</html>
