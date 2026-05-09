@@ -65,12 +65,11 @@ searchForm.addEventListener("submit", async (e) => {
       $("#result-error").classList.remove("hidden");
     } else {
       showStatus(searchStatus, "success", "查询完成!");
-      $("#organic-rank").textContent = data.organic_rank ?? "--";
-      $("#organic-page").textContent = data.organic_page ? `第 ${data.organic_page} 页` : "";
-      $("#ad-rank").textContent = data.ad_rank ?? "--";
-      $("#ad-page").textContent = data.ad_page ? `第 ${data.ad_page} 页` : "";
-      $("#total-results").textContent = data.total_results.toLocaleString();
-      $("#pages-scanned").textContent = data.pages_scanned;
+      $("#organic-rank").textContent = formatPosition(data.organic_page, data.organic_pos, data.organic_status);
+      $("#organic-detail").textContent = data.organic_status === "found" ? `第${data.organic_page}页第${data.organic_pos}位` : "";
+      $("#ad-rank").textContent = formatPosition(data.ad_page, data.ad_pos, data.ad_status);
+      $("#ad-detail").textContent = data.ad_status === "found" ? `第${data.ad_page}页第${data.ad_pos}位` : "";
+      $("#total-results").textContent = (data.total_results || 0).toLocaleString();
       $("#result-error").classList.add("hidden");
       resultPanel.classList.remove("hidden");
     }
@@ -207,8 +206,8 @@ async function loadMonitors() {
         const orgEl = document.getElementById(`org-${m.id}`);
         const adEl  = document.getElementById(`ad-${m.id}`);
         const tsEl  = document.getElementById(`ts-${m.id}`);
-        if (orgEl) orgEl.textContent = r.organic_rank ?? "--";
-        if (adEl)  adEl.textContent  = r.ad_rank ?? "--";
+        if (orgEl) orgEl.innerHTML = formatPositionCell(r.organic_page, r.organic_pos, r.organic_status);
+        if (adEl)  adEl.innerHTML  = formatPositionCell(r.ad_page, r.ad_pos, r.ad_status);
         if (tsEl)  tsEl.textContent  = r.created_at?.slice(0, 16) ?? "--";
       }
     }
@@ -380,8 +379,8 @@ async function loadCloudData() {
           <td>${esc(m.owner || "--")}</td>
           <td>${m.schedule_time ? `<span class="schedule-badge">${m.schedule_time}</span>` : '<span class="schedule-off">--</span>'}</td>
           <td><span class="tz-badge">${tzLabel(m.timezone)}</span></td>
-          <td>${rankCell(r.organic_rank)}</td>
-          <td>${rankCell(r.ad_rank)}</td>
+          <td>${formatPositionCell(r.organic_page, r.organic_pos, r.organic_status)}</td>
+          <td>${formatPositionCell(r.ad_page, r.ad_pos, r.ad_status)}</td>
           <td>${r.timestamp ? r.timestamp.slice(0, 16) : "--"}</td>
           <td><span class="rank-null" style="font-size:0.8rem">云端模式</span></td>
         </tr>`;
@@ -399,8 +398,8 @@ async function loadCloudData() {
           <td>${esc(r.keyword)}</td>
           <td><code>${esc(r.asin)}</code></td>
           <td>${r.zip_code || "--"}</td>
-          <td>${rankCell(r.organic_rank)}</td>
-          <td>${rankCell(r.ad_rank)}</td>
+          <td>${formatPositionCell(r.organic_page, r.organic_pos, r.organic_status)}</td>
+          <td>${formatPositionCell(r.ad_page, r.ad_pos, r.ad_status)}</td>
           <td>${r.total_results?.toLocaleString() ?? "--"}</td>
           <td>${r.error ? `<span style="color:var(--danger)">失败</span>` : "成功"}</td>
         </tr>`).join("");
@@ -432,8 +431,8 @@ async function loadHistory() {
           <td>${esc(r.keyword)}</td>
           <td><code>${esc(r.asin)}</code></td>
           <td>${r.zip_code || "--"}</td>
-          <td>${rankCell(r.organic_rank)}</td>
-          <td>${rankCell(r.ad_rank)}</td>
+          <td>${formatPositionCell(r.organic_page, r.organic_pos, r.organic_status)}</td>
+          <td>${formatPositionCell(r.ad_page, r.ad_pos, r.ad_status)}</td>
           <td>${r.total_results?.toLocaleString() ?? "--"}</td>
           <td>${r.error ? `<span style="color:var(--danger)">失败</span>` : "成功"}</td>
         </tr>`).join("");
@@ -480,8 +479,9 @@ async function updateTrendChart() {
     const data = await res.json();
 
     const labels = data.map(d => d.created_at?.slice(5, 16) ?? "");
-    const organicData = data.map(d => d.organic_rank);
-    const adData = data.map(d => d.ad_rank);
+    // Compute approximate global rank for charting: (page-1)*20 + position
+    const organicData = data.map(d => (d.organic_page != null && d.organic_pos != null) ? (d.organic_page - 1) * 20 + d.organic_pos : null);
+    const adData = data.map(d => (d.ad_page != null && d.ad_pos != null) ? (d.ad_page - 1) * 20 + d.ad_pos : null);
 
     if (chartInstance) chartInstance.destroy();
 
@@ -533,7 +533,7 @@ async function updateTrendChart() {
           legend: { position: "bottom" },
           tooltip: {
             callbacks: {
-              label: (ctx) => ctx.raw ? `第 ${ctx.raw} 位` : "未找到",
+              label: (ctx) => ctx.raw ? `≈第 ${ctx.raw} 位` : "未找到",
             },
           },
         },
@@ -554,6 +554,24 @@ function showStatus(el, type, msg) {
 function rankCell(val) {
   if (val == null) return `<span class="rank-null">--</span>`;
   return `<span class="rank-hit">#${val}</span>`;
+}
+
+function formatPosition(page, pos, status) {
+  if (status === "found" && page != null && pos != null) return `第${page}页第${pos}位`;
+  if (status === "not_loaded") return "未显示";
+  return "未找到";
+}
+
+function formatPositionCell(page, pos, status) {
+  if (status === "found" && page != null && pos != null) return `<span class="rank-hit">第${page}页第${pos}位</span>`;
+  if (status === "not_loaded") return `<span class="rank-null">未显示</span>`;
+  return `<span class="rank-null">未找到</span>`;
+}
+
+function statusLabel(status) {
+  if (status === "not_loaded") return "未显示";
+  if (status === "not_found") return "未找到";
+  return "";
 }
 
 function tzLabel(tz) {

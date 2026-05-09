@@ -24,13 +24,15 @@ async function initDb() {
       keyword TEXT NOT NULL,
       asin TEXT NOT NULL,
       zip_code TEXT NOT NULL DEFAULT '',
-      organic_rank INTEGER,
       organic_page INTEGER,
-      ad_rank INTEGER,
+      organic_pos INTEGER,
+      organic_status TEXT DEFAULT 'not_found',
       ad_page INTEGER,
+      ad_pos INTEGER,
+      ad_status TEXT DEFAULT 'not_found',
       total_results INTEGER DEFAULT 0,
-      pages_scanned INTEGER DEFAULT 0,
       error TEXT,
+      source TEXT NOT NULL DEFAULT 'manual',
       created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     );
 
@@ -91,13 +93,15 @@ function dbRun(sql, params = []) {
   save();
 }
 
-function saveResult({ keyword, asin, zip_code, organic_rank, organic_page, ad_rank, ad_page, total_results, pages_scanned, error }) {
+function saveResult({ keyword, asin, zip_code, organic_page, organic_pos, organic_status, ad_page, ad_pos, ad_status, total_results, error, source = "manual" }) {
   dbRun(
-    `INSERT INTO searches (keyword, asin, zip_code, organic_rank, organic_page,
-                           ad_rank, ad_page, total_results, pages_scanned, error)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [keyword, asin, zip_code, organic_rank ?? null, organic_page ?? null,
-     ad_rank ?? null, ad_page ?? null, total_results, pages_scanned, error ?? null]
+    `INSERT INTO searches (keyword, asin, zip_code, organic_page, organic_pos, organic_status,
+                           ad_page, ad_pos, ad_status, total_results, error, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [keyword, asin, zip_code,
+     organic_page ?? null, organic_pos ?? null, organic_status ?? "not_found",
+     ad_page ?? null, ad_pos ?? null, ad_status ?? "not_found",
+     total_results ?? 0, error ?? null, source]
   );
 }
 
@@ -113,13 +117,25 @@ function getHistory({ keyword, asin, limit = 100 } = {}) {
 
 function getTrend(keyword, asin, zip_code = "", days = 30) {
   return dbAll(
-    `SELECT created_at, organic_rank, ad_rank
+    `SELECT created_at, organic_page, organic_pos, ad_page, ad_pos, ad_status
      FROM searches
      WHERE keyword = ? AND asin = ? AND zip_code = ?
+       AND source = 'monitored'
        AND created_at >= datetime('now','localtime','-' || ? || ' days')
      ORDER BY created_at ASC`,
     [keyword, asin, zip_code, days]
   );
+}
+
+function getLatestMonitorResult(asin, keyword) {
+  const rows = dbAll(
+    `SELECT organic_page, organic_pos, ad_page, ad_pos, ad_status, created_at
+     FROM searches
+     WHERE asin = ? AND keyword = ? AND source = 'monitored'
+     ORDER BY created_at DESC LIMIT 1`,
+    [asin, keyword]
+  );
+  return rows[0] || null;
 }
 
 function addMonitor(asin, keyword, zip_code = "", product_name = null, owner = null, label = null, schedule_time = null, timezone = "America/Los_Angeles") {
@@ -183,7 +199,7 @@ function bulkAddMonitors(entries) {
 }
 
 module.exports = {
-  initDb, saveResult, getHistory, getTrend,
+  initDb, saveResult, getHistory, getTrend, getLatestMonitorResult,
   addMonitor, updateMonitor, getMonitors, toggleMonitor, deleteMonitor,
   bulkAddMonitors,
 };

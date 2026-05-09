@@ -8,7 +8,7 @@ const multer = require("multer");
 const XLSX = require("xlsx");
 
 const {
-  initDb, saveResult, getHistory, getTrend,
+  initDb, saveResult, getHistory, getTrend, getLatestMonitorResult,
   addMonitor, updateMonitor, getMonitors, toggleMonitor, deleteMonitor,
   bulkAddMonitors,
 } = require("./database");
@@ -21,9 +21,11 @@ const PORT = 5050;
 app.use(express.json());
 app.use("/static", express.static(path.join(__dirname, "static")));
 app.use("/results", express.static(path.join(__dirname, "results")));
+
+const MONITORS_JSON = path.join(__dirname, "monitors.json");
 app.get("/monitors.json", (_req, res) => res.sendFile(MONITORS_JSON));
 
-// ── Multer for Excel upload ────────────────────────────────────────────────
+// ── Multer ──────────────────────────────────────────────────────────────────
 
 const uploadDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
@@ -32,13 +34,9 @@ const upload = multer({
   dest: uploadDir,
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    if ([".xlsx", ".xls", ".csv"].includes(ext)) {
-      cb(null, true);
-    } else {
-      cb(new Error("Only .xlsx, .xls, .csv files are allowed"));
-    }
+    cb(null, [".xlsx", ".xls", ".csv"].includes(ext));
   },
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  limits: { fileSize: 5 * 1024 * 1024 },
 });
 
 // ── Serve index ────────────────────────────────────────────────────────────
@@ -47,10 +45,10 @@ app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "templates", "index.html"));
 });
 
-const MONITORS_JSON = path.join(__dirname, "monitors.json");
+// ── Monitor JSON sync ──────────────────────────────────────────────────────
 
 function syncMonitorsToJson() {
-  const monitors = getMonitors(false); // all, including inactive
+  const monitors = getMonitors(false);
   const data = monitors.map(m => ({
     asin: m.asin,
     keyword: m.keyword,
@@ -82,15 +80,53 @@ async function doSearch(keyword, asin, zipCode) {
   return await s.searchRankings(keyword, asin, zipCode);
 }
 
+// ── Batch helper: group monitors by keyword, scrape once per keyword ──────
+
+async function batchRunMonitors(monitors) {
+  const byKeyword = new Map();
+  for (const m of monitors) {
+    if (!byKeyword.has(m.keyword)) byKeyword.set(m.keyword, []);
+    byKeyword.get(m.keyword).push(m);
+  }
+
+  const allResults = [];
+  const s = await getScraper();
+
+  for (const [keyword, items] of byKeyword) {
+    const asins = items.map(m => m.asin);
+    const zip = items[0].zip_code || ""; // use first monitor's zip
+    console.log(`  Batch: "${keyword}" → ${asins.length} ASINs`);
+    const resultMap = await s.batchSearchRankings(keyword, asins, zip);
+
+    for (const m of items) {
+      const r = resultMap[m.asin];
+      if (r) {
+        saveResult({ ...r, source: "monitored" });
+        allResults.push({
+          keyword: m.keyword,
+          asin: m.asin,
+          organic_page: r.organic_page,
+          organic_pos: r.organic_pos,
+          organic_status: r.organic_status,
+          ad_page: r.ad_page,
+          ad_pos: r.ad_pos,
+          ad_status: r.ad_status,
+          error: r.error,
+        });
+      }
+    }
+  }
+
+  return allResults;
+}
+
 // ── Scheduler ──────────────────────────────────────────────────────────────
 
 const scheduleMap = new Map();
 
 function rebuildSchedules() {
-  syncMonitorsToJson(); // keep monitors.json in sync for cloud scheduler
-  for (const [, task] of scheduleMap) {
-    task.stop();
-  }
+  syncMonitorsToJson();
+  for (const [, task] of scheduleMap) { task.stop(); }
   scheduleMap.clear();
 
   const monitors = getMonitors(true);
@@ -98,9 +134,7 @@ function rebuildSchedules() {
 
   for (const m of monitors) {
     if (!m.schedule_time) continue;
-    if (!byTime.has(m.schedule_time)) {
-      byTime.set(m.schedule_time, []);
-    }
+    if (!byTime.has(m.schedule_time)) byTime.set(m.schedule_time, []);
     byTime.get(m.schedule_time).push(m);
   }
 
@@ -110,7 +144,6 @@ function rebuildSchedules() {
     const cronExpr = `${parseInt(minute)} ${parseInt(hour)} * * *`;
     if (!cron.validate(cronExpr)) continue;
 
-    // Group by time + timezone: items at the same HH:MM but different TZ need separate jobs
     const byTz = new Map();
     for (const m of items) {
       const tz = m.timezone || "America/Los_Angeles";
@@ -121,16 +154,8 @@ function rebuildSchedules() {
     for (const [tz, tzItems] of byTz) {
       const key = `${timeStr}|${tz}`;
       const task = cron.schedule(cronExpr, async () => {
-        console.log(`[Scheduler] Running ${tzItems.length} monitor(s) at ${timeStr} (${tz})`);
-        for (const m of tzItems) {
-          try {
-            const r = await doSearch(m.keyword, m.asin, m.zip_code);
-            saveResult(r);
-            console.log(`  ${m.asin} / ${m.keyword} → organic=${r.organic_rank}, ad=${r.ad_rank}`);
-          } catch (err) {
-            console.error(`  ${m.asin} / ${m.keyword} → error: ${err.message}`);
-          }
-        }
+        console.log(`[Scheduler] Running ${tzItems.length} monitor(s) at ${timeStr} ${tz}`);
+        await batchRunMonitors(tzItems);
       }, { timezone: tz });
 
       scheduleMap.set(key, task);
@@ -139,7 +164,7 @@ function rebuildSchedules() {
   }
 }
 
-// ── API: Search ────────────────────────────────────────────────────────────
+// ── API: Search (manual — NOT saved as trend) ──────────────────────────────
 
 app.post("/api/search", async (req, res) => {
   const { keyword, asin, zip_code = "" } = req.body || {};
@@ -147,7 +172,7 @@ app.post("/api/search", async (req, res) => {
     return res.status(400).json({ error: "Keyword and ASIN are required" });
   }
   const result = await doSearch(keyword.trim(), asin.trim(), (zip_code || "").trim());
-  saveResult(result);
+  saveResult({ ...result, source: "manual" });
   return res.json(result);
 });
 
@@ -163,7 +188,7 @@ app.get("/api/history", (req, res) => {
   return res.json(rows);
 });
 
-// ── API: Trend ─────────────────────────────────────────────────────────────
+// ── API: Trend (monitored results only) ────────────────────────────────────
 
 app.get("/api/trend", (req, res) => {
   const { keyword, asin, zip_code = "", days } = req.query;
@@ -189,45 +214,27 @@ app.post("/api/monitors", (req, res) => {
   const ok = addMonitor(
     asin.trim(), keyword.trim(),
     (zip_code || "").trim(),
-    product_name || null,
-    owner || null,
-    label || null,
-    schedule_time || null,
-    timezone || "America/Los_Angeles"
+    product_name || null, owner || null, label || null,
+    schedule_time || null, timezone || "America/Los_Angeles"
   );
-  if (ok) {
-    rebuildSchedules();
-    return res.json({ status: "added" });
-  }
+  if (ok) { rebuildSchedules(); return res.json({ status: "added" }); }
   return res.status(409).json({ status: "already_exists" });
 });
 
 app.patch("/api/monitors/:id", (req, res) => {
   const id = parseInt(req.params.id);
   const updates = req.body || {};
-
-  // Map frontend field names to DB column names
   const fieldMap = {
-    asin: "asin",
-    keyword: "keyword",
-    zip_code: "zip_code",
-    product_name: "product_name",
-    owner: "owner",
-    label: "label",
-    schedule_time: "schedule_time",
-    timezone: "timezone",
-    active: "active",
-    zipCode: "zip_code",
-    scheduleTime: "schedule_time",
-    productName: "product_name",
+    asin: "asin", keyword: "keyword", zip_code: "zip_code",
+    product_name: "product_name", owner: "owner", label: "label",
+    schedule_time: "schedule_time", timezone: "timezone", active: "active",
+    zipCode: "zip_code", scheduleTime: "schedule_time", productName: "product_name",
   };
-
   const dbUpdates = {};
   for (const [key, value] of Object.entries(updates)) {
     const dbKey = fieldMap[key] || key;
     dbUpdates[dbKey] = value;
   }
-
   updateMonitor(id, dbUpdates);
   rebuildSchedules();
   return res.json({ status: "updated" });
@@ -242,71 +249,41 @@ app.delete("/api/monitors/:id", (req, res) => {
 // ── API: Excel import ──────────────────────────────────────────────────────
 
 app.post("/api/monitors/import", upload.single("file"), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: "No file uploaded" });
-  }
-
+  if (!req.file) return res.status(400).json({ error: "No file uploaded" });
   try {
     const workbook = XLSX.readFile(req.file.path);
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
-
-    // Normalize header keys (case-insensitive)
     const headerMap = {
-      "asin": "asin", "ASIN": "asin",
-      "keyword": "keyword", "Keyword": "keyword", "keywords": "keyword", "KEYWORD": "keyword",
-      "zip": "zip_code", "zip code": "zip_code", "zipcode": "zip_code", "Zip Code": "zip_code", "ZIP": "zip_code", "邮编": "zip_code",
-      "product name": "product_name", "Product Name": "product_name", "product": "product_name", "产品名称": "product_name",
-      "owner": "owner", "Owner": "owner", "负责人": "owner",
-      "label": "label", "Label": "label", "标签": "label", "备注": "label",
-      "schedule": "schedule_time", "schedule time": "schedule_time", "scheduletime": "schedule_time", "Schedule": "schedule_time", "定时": "schedule_time",
-      "timezone": "timezone", "Timezone": "timezone", "Time Zone": "timezone", "时区": "timezone",
+      "asin": "asin", "keyword": "keyword", "zip code": "zip_code", "zip": "zip_code",
+      "product name": "product_name", "owner": "owner", "label": "label",
+      "schedule": "schedule_time", "schedule time": "schedule_time",
+      "timezone": "timezone", "time zone": "timezone",
     };
-
     const entries = [];
     for (const row of rows) {
       const entry = {};
       for (const [key, value] of Object.entries(row)) {
-        const normalizedKey = key.trim().toLowerCase();
-        const mapped = Object.entries(headerMap).find(
-          ([h]) => h.toLowerCase() === normalizedKey
-        );
-        if (mapped) {
-          const strVal = String(value).trim();
-          entry[mapped[1]] = strVal || null;
+        const norm = key.trim().toLowerCase();
+        for (const [h, target] of Object.entries(headerMap)) {
+          if (h === norm) { const v = String(value).trim(); entry[target] = v || null; }
         }
       }
-      // Also try direct mapping (case-insensitive)
       if (!entry.asin) entry.asin = row["ASIN"] || row["asin"] || null;
-      if (!entry.keyword) entry.keyword = row["Keyword"] || row["keyword"] || row["keywords"] || null;
-      if (entry.asin && entry.keyword) {
-        entries.push(entry);
-      }
+      if (!entry.keyword) entry.keyword = row["Keyword"] || row["keyword"] || null;
+      if (entry.asin && entry.keyword) entries.push(entry);
     }
-
     const result = bulkAddMonitors(entries);
     rebuildSchedules();
-
-    // Clean up uploaded file
-    fs.unlinkSync(req.file.path);
-
-    return res.json({
-      status: "imported",
-      added: result.added,
-      skipped: result.skipped,
-      total: entries.length,
-    });
+    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    return res.json({ status: "imported", added: result.added, skipped: result.skipped, total: entries.length });
   } catch (err) {
-    // Clean up on error
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
+    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
     return res.status(400).json({ error: `Parse error: ${err.message}` });
   }
 });
 
-// ── API: Download Excel template ────────────────────────────────────────────
+// ── API: Template download ─────────────────────────────────────────────────
 
 app.get("/api/monitors/template", (_req, res) => {
   const template = [
@@ -316,30 +293,16 @@ app.get("/api/monitors/template", (_req, res) => {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Monitors");
   const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
-
   res.setHeader("Content-Disposition", "attachment; filename=monitor_template.xlsx");
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   return res.send(Buffer.from(buf));
 });
 
-// ── API: Run all monitors ──────────────────────────────────────────────────
+// ── API: Run all (batched by keyword) ──────────────────────────────────────
 
 app.post("/api/monitors/run-all", async (req, res) => {
   const monitors = getMonitors(true);
-  const results = [];
-
-  for (const m of monitors) {
-    const r = await doSearch(m.keyword, m.asin, m.zip_code);
-    saveResult(r);
-    results.push({
-      keyword: m.keyword,
-      asin: m.asin,
-      organic_rank: r.organic_rank,
-      ad_rank: r.ad_rank,
-      error: r.error,
-    });
-  }
-
+  const results = await batchRunMonitors(monitors);
   return res.json(results);
 });
 
@@ -354,12 +317,9 @@ app.get("/api/schedules", (_req, res) => {
   return res.json(result);
 });
 
-// ── Error handler (multer errors) ──────────────────────────────────────────
+// ── Error handler ──────────────────────────────────────────────────────────
 
 app.use((err, _req, res, _next) => {
-  if (err.message?.includes("Only .xlsx")) {
-    return res.status(400).json({ error: err.message });
-  }
   console.error(err);
   return res.status(500).json({ error: "Internal error" });
 });

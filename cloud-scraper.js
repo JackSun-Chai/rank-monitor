@@ -83,41 +83,61 @@ async function main() {
 
   console.log(`Running ${toRun.length} monitor(s)...`);
 
-  const scraper = new AmazonScraper(true); // headless
+  const scraper = new AmazonScraper(true);
   await scraper.start();
 
-  const results = [];
+  // Batch by keyword for efficiency — same as server.js batchRunMonitors
+  const byKeyword = new Map();
   for (const m of toRun) {
-    console.log(`  Scraping: ${m.asin} / ${m.keyword} (zip=${m.zip_code})`);
+    if (!byKeyword.has(m.keyword)) byKeyword.set(m.keyword, []);
+    byKeyword.get(m.keyword).push(m);
+  }
+
+  const results = [];
+  for (const [keyword, items] of byKeyword) {
+    const asins = items.map(m => m.asin);
+    const zip = items[0].zip_code || "";
+    console.log(`  Batch: "${keyword}" → ${asins.length} ASIN(s)`);
     try {
-      const r = await scraper.searchRankings(m.keyword, m.asin, m.zip_code || "");
-      results.push({
-        asin: m.asin,
-        keyword: m.keyword,
-        zip_code: m.zip_code || "",
-        product_name: m.product_name || "",
-        owner: m.owner || "",
-        organic_rank: r.organic_rank,
-        ad_rank: r.ad_rank,
-        total_results: r.total_results,
-        error: r.error,
-        timestamp: r.timestamp,
-      });
-      console.log(`    organic=#${r.organic_rank}, ad=#${r.ad_rank}`);
+      const resultMap = await scraper.batchSearchRankings(keyword, asins, zip);
+      for (const m of items) {
+        const r = resultMap[m.asin];
+        if (r) {
+          results.push({
+            asin: m.asin,
+            keyword: m.keyword,
+            zip_code: m.zip_code || "",
+            product_name: m.product_name || "",
+            owner: m.owner || "",
+            organic_page: r.organic_page,
+            organic_pos: r.organic_pos,
+            organic_status: r.organic_status,
+            ad_page: r.ad_page,
+            ad_pos: r.ad_pos,
+            ad_status: r.ad_status,
+            total_results: r.total_results,
+            error: r.error,
+            timestamp: r.timestamp,
+          });
+          console.log(`    ${m.asin}: organic=${r.organic_status === "found" ? `第${r.organic_page}页第${r.organic_pos}位` : r.organic_status}, ad=${r.ad_status === "found" ? `第${r.ad_page}页第${r.ad_pos}位` : r.ad_status}`);
+        }
+      }
     } catch (err) {
-      results.push({
-        asin: m.asin,
-        keyword: m.keyword,
-        zip_code: m.zip_code || "",
-        product_name: m.product_name || "",
-        owner: m.owner || "",
-        organic_rank: null,
-        ad_rank: null,
-        total_results: 0,
-        error: err.message,
-        timestamp: new Date().toISOString().replace("T", " ").slice(0, 19),
-      });
-      console.error(`    Error: ${err.message}`);
+      for (const m of items) {
+        results.push({
+          asin: m.asin,
+          keyword: m.keyword,
+          zip_code: m.zip_code || "",
+          product_name: m.product_name || "",
+          owner: m.owner || "",
+          organic_page: null, organic_pos: null, organic_status: "not_found",
+          ad_page: null, ad_pos: null, ad_status: "not_found",
+          total_results: 0,
+          error: err.message,
+          timestamp: new Date().toISOString().replace("T", " ").slice(0, 19),
+        });
+      }
+      console.error(`    Batch error for "${keyword}": ${err.message}`);
     }
   }
 
