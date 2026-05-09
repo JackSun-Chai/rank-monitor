@@ -64,19 +64,7 @@ class AmazonScraper {
     const page = await context.newPage();
 
     try {
-      // 1. Navigate to Amazon home
-      await page.goto(AMAZON_URL, {
-        waitUntil: "domcontentloaded",
-        timeout: DEFAULT_TIMEOUT,
-      });
-
-      // 2. Set delivery zip code if provided
-      if (zipCode) {
-        await this._setZipCode(page, zipCode);
-        await page.waitForTimeout(1500);
-      }
-
-      // 3. Search keyword
+      // Go directly to search (skip homepage + zip UI — unreliable from non-US IPs)
       const encodedKw = encodeURIComponent(keyword);
       const searchUrl = `${AMAZON_URL}/s?k=${encodedKw}&i=aps`;
       await page.goto(searchUrl, {
