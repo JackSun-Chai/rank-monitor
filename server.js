@@ -167,7 +167,7 @@ function rebuildSchedules() {
 // ── API: Search (manual — NOT saved as trend) ──────────────────────────────
 
 app.post("/api/search", async (req, res) => {
-  const { keyword, asin, zip_code = "" } = req.body || {};
+  const { keyword, asin, zip_code = "90001" } = req.body || {};
   if (!keyword || !asin) {
     return res.status(400).json({ error: "Keyword and ASIN are required" });
   }
@@ -191,7 +191,7 @@ app.get("/api/history", (req, res) => {
 // ── API: Trend (monitored results only) ────────────────────────────────────
 
 app.get("/api/trend", (req, res) => {
-  const { keyword, asin, zip_code = "", days } = req.query;
+  const { keyword, asin, zip_code = "90001", days } = req.query;
   if (!keyword || !asin) {
     return res.status(400).json({ error: "keyword and asin required" });
   }
