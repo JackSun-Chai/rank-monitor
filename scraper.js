@@ -92,11 +92,9 @@ class AmazonScraper {
       }
       await page.waitForTimeout(2000);
 
-      // 5. Ensure ads are loaded (with retry)
-      const adStatus = await this._ensureAdsLoaded(page, keyword);
-      const adsAvailable = adStatus === "loaded";
+      // 5. Scan organic results first (no refresh needed)
+      let adsSeen = false;
 
-      // 6. Scan up to 3 pages (page-local positions for "第x页第x位")
       for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
         if (pageNum > 1) {
           await page.goto(`${AMAZON_URL}/s?k=${encodedKw}&i=aps&page=${pageNum}`, {
@@ -104,10 +102,6 @@ class AmazonScraper {
             timeout: DEFAULT_TIMEOUT,
           });
           await page.waitForTimeout(2000);
-          if (adsAvailable) {
-            const again = await this._ensureAdsLoaded(page, keyword);
-            if (again !== "loaded") break;
-          }
         }
 
         const cards = page.locator("div[data-asin]:not([data-asin=''])");
@@ -115,8 +109,7 @@ class AmazonScraper {
         if (count === 0) break;
 
         let remaining = new Set([...targetSet].filter(
-          a => resultMap[a].organic_pos === null &&
-               (resultMap[a].ad_pos === null || !adsAvailable)
+          a => resultMap[a].organic_pos === null
         ));
         if (remaining.size === 0) break;
 
@@ -130,8 +123,9 @@ class AmazonScraper {
 
           if (sponsored) {
             pageAdPos++;
+            adsSeen = true;
             if (cardAsin && targetSet.has(cardAsin) &&
-                resultMap[cardAsin].ad_pos === null && adsAvailable) {
+                resultMap[cardAsin].ad_pos === null) {
               resultMap[cardAsin].ad_page = pageNum;
               resultMap[cardAsin].ad_pos = pageAdPos;
               resultMap[cardAsin].ad_status = "found";
@@ -147,18 +141,42 @@ class AmazonScraper {
           }
         }
 
-        // Check if there's a next page
         const nextBtn = page.locator(
           "a.s-pagination-next:not(.s-pagination-disabled)"
         );
         if (await nextBtn.count() === 0) break;
       }
 
-      // Post-process: set ad_status for results where ads never appeared
-      if (!adsAvailable) {
-        for (const a of asins) {
-          if (resultMap[a].ad_pos === null) {
-            resultMap[a].ad_status = "not_loaded";
+      // 6. Ads: if no ads seen at all, try ONE refresh for ad positions
+      if (!adsSeen) {
+        // check if ads exist on the page at all
+        const sponsoredEls = page.locator('text="Sponsored"');
+        if (await sponsoredEls.count() === 0) {
+          await page.reload({ waitUntil: "domcontentloaded", timeout: DEFAULT_TIMEOUT });
+          await page.waitForTimeout(2000);
+        }
+        const hasAds = (await page.locator('text="Sponsored"').count()) > 0;
+        if (hasAds) {
+          const adCards = page.locator("div[data-asin]:not([data-asin=''])");
+          const adCount = await adCards.count();
+          let pgAd = 0;
+          for (let i = 0; i < adCount; i++) {
+            const card = adCards.nth(i);
+            const cardAsin = await card.getAttribute("data-asin");
+            if (await this._isSponsored(card)) {
+              pgAd++;
+              if (cardAsin && targetSet.has(cardAsin) && resultMap[cardAsin].ad_pos === null) {
+                resultMap[cardAsin].ad_page = 1;
+                resultMap[cardAsin].ad_pos = pgAd;
+                resultMap[cardAsin].ad_status = "found";
+              }
+            }
+          }
+        } else {
+          for (const a of asins) {
+            if (resultMap[a].ad_pos === null) {
+              resultMap[a].ad_status = "not_loaded";
+            }
           }
         }
       }
@@ -209,52 +227,71 @@ class AmazonScraper {
   // ── Zip code setting ──────────────────────────────────────────────────
 
   async _setZipCode(page, zipCode) {
-    try {
-      await page.goto(
-        `${AMAZON_URL}/gp/delivery/ajax/address-change.html?zipCode=${zipCode}`,
-        { waitUntil: "domcontentloaded", timeout: 10000 }
-      );
-      await page.waitForTimeout(800);
-      await page.goto(AMAZON_URL, {
-        waitUntil: "domcontentloaded",
-        timeout: DEFAULT_TIMEOUT,
-      });
-      return true;
-    } catch {
-      try {
-        await page.goto(AMAZON_URL, {
-          waitUntil: "domcontentloaded",
-          timeout: DEFAULT_TIMEOUT,
-        });
-        let locator = page.locator("#glow-ingress-line2");
-        if ((await locator.count()) === 0) {
-          locator = page.locator("#nav-global-location-popover-link");
-        }
-        if ((await locator.count()) === 0) return false;
-        await locator.first().click();
-        await page.waitForTimeout(1500);
+    // Go to homepage
+    await page.goto(AMAZON_URL, { waitUntil: "domcontentloaded", timeout: DEFAULT_TIMEOUT });
+    await page.waitForTimeout(1500);
 
-        let zipInput = page.locator("#GLUXZipUpdateInput");
-        if ((await zipInput.count()) === 0) {
-          zipInput = page.locator("#GLUXZipUpdateInput0");
-        }
-        if ((await zipInput.count()) === 0) return false;
-        await zipInput.first().fill(zipCode);
-        await page.waitForTimeout(500);
-
-        let applyBtn = page.locator("#GLUXZipUpdate");
-        if ((await applyBtn.count()) === 0) {
-          applyBtn = page.getByRole("button", { name: /Apply|Submit/i });
-        }
-        if ((await applyBtn.count()) > 0) {
-          await applyBtn.first().click();
-          await page.waitForTimeout(1500);
-        }
-        return true;
-      } catch {
-        return false;
+    // Click the "Deliver to" link — try multiple known selectors
+    const locationTriggers = [
+      "#glow-ingress-line2",
+      "#glow-ingress-line1",
+      "#nav-global-location-popover-link",
+      "#glow-ingress-block",
+      "a[href*='address-change']",
+    ];
+    let clicked = false;
+    for (const sel of locationTriggers) {
+      const el = page.locator(sel).first();
+      if (await el.count() > 0 && await el.isVisible()) {
+        await el.click();
+        clicked = true;
+        break;
       }
     }
+    if (!clicked) return false;
+    await page.waitForTimeout(2000);
+
+    // Find zip input in the popup — use broad matching
+    const zipInputSelectors = [
+      "input[id*='GLUX'][id*='Zip']",
+      "input[placeholder*='ZIP']",
+      "input[placeholder*='zip']",
+      "input[aria-label*='zip' i]",
+      "input[aria-label*='ZIP']",
+      "input[id*='ZipUpdate']",
+      "#GLUXZipUpdateInput",
+      "#GLUXZipUpdateInput0",
+    ];
+    let filled = false;
+    for (const sel of zipInputSelectors) {
+      const inp = page.locator(sel).first();
+      if (await inp.count() > 0) {
+        await inp.click();
+        await inp.fill(zipCode);
+        filled = true;
+        break;
+      }
+    }
+    if (!filled) return false;
+    await page.waitForTimeout(500);
+
+    // Click Apply
+    const applySelectors = [
+      "#GLUXZipUpdate",
+      "#GLUXZipUpdateBtn",
+      "button:has-text('Apply')",
+      "input[type='submit'][value='Apply']",
+      "span:has-text('Apply')",
+    ];
+    for (const sel of applySelectors) {
+      const btn = page.locator(sel).first();
+      if (await btn.count() > 0) {
+        await btn.click();
+        break;
+      }
+    }
+    await page.waitForTimeout(2000);
+    return true;
   }
 
   // ── Sponsored detection ───────────────────────────────────────────────
