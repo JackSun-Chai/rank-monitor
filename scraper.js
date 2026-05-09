@@ -78,7 +78,7 @@ class AmazonScraper {
 
       // 3. Search keyword
       const encodedKw = encodeURIComponent(keyword);
-      const searchUrl = `${AMAZON_URL}/s?k=${encodedKw}`;
+      const searchUrl = `${AMAZON_URL}/s?k=${encodedKw}&i=aps`;
       await page.goto(searchUrl, {
         waitUntil: "domcontentloaded",
         timeout: DEFAULT_TIMEOUT,
@@ -99,7 +99,7 @@ class AmazonScraper {
       // 6. Scan up to 3 pages (page-local positions for "第x页第x位")
       for (let pageNum = 1; pageNum <= MAX_PAGES; pageNum++) {
         if (pageNum > 1) {
-          await page.goto(`${AMAZON_URL}/s?k=${encodedKw}&page=${pageNum}`, {
+          await page.goto(`${AMAZON_URL}/s?k=${encodedKw}&i=aps&page=${pageNum}`, {
             waitUntil: "domcontentloaded",
             timeout: DEFAULT_TIMEOUT,
           });
